@@ -12,10 +12,10 @@ from playwright.async_api import async_playwright
 
 
 class MontenegroCourtscraper:
-    def __init__(self, output_dir="../judgments"):
+    def __init__(self, output_dir="../mlm"):
         self.base_url = "https://sudovi.me/sdvi/odluke"
         self.search_term = "kriv je"
-        self.max_results = 30
+        self.max_results = 200
         self.output_dir = Path(output_dir).resolve()  # Get absolute path
 
         # Create output directory if it doesn't exist
@@ -252,7 +252,7 @@ class MontenegroCourtscraper:
             return
         
         # Process only the first N results
-        results_to_process = result_links[400:400+self.max_results]
+        results_to_process = result_links[800:800+self.max_results]
         print(f"Found {len(result_links)} total results, processing first {len(results_to_process)}")
         
         for i, result_link in enumerate(results_to_process):
