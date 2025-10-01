@@ -14,7 +14,7 @@ from playwright.async_api import async_playwright
 class MontenegroCourtscraper:
     def __init__(self, output_dir="../mlm"):
         self.base_url = "https://sudovi.me/sdvi/odluke"
-        self.search_term = "OSLOBADJA SE OD OPTUŽBE"
+        self.search_term = "kriv je"
         self.max_results = 1000
         self.output_dir = Path(output_dir).resolve()  # Get absolute path
 
@@ -116,7 +116,7 @@ class MontenegroCourtscraper:
         async with async_playwright() as p:
             # Launch browser
             browser = await p.chromium.launch(
-                headless=False,  # Set to True for headless mode
+                headless=True,  # Set to True for headless mode
             )
             
             # Create new page
