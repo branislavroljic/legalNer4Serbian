@@ -30,7 +30,7 @@ DEFAULT_MODEL_CONFIG = {
     "max_length": 512,
     "stride": 128,
     "learning_rate": 3e-5,
-    "batch_size": 4,
+    "batch_size": 8,
     "num_epochs": 8
 }
 
@@ -77,17 +77,17 @@ BIO_LABELS = create_bio_labels(ENTITY_TYPES)
 # Default paths (can be overridden)
 DEFAULT_PATHS = {
     # Data paths
-    "labelstudio_json": "/content/drive/MyDrive/NER_Master/annotations.json",
-    "judgments_dir": "/content/drive/MyDrive/NER_Master/judgments",
-    "labelstudio_files_dir": "/content/drive/MyDrive/NER_Master/judgments",
+    "labelstudio_json": "/datasets/annotations/annotations.json",
+    "judgments_dir": "/datasets/judgments",
+    "labelstudio_files_dir": "/datasets/judgments",
     
     # MLM paths
-    "mlm_data_dir": "/content/drive/MyDrive/NER_Master/dapt-mlm",
+    "mlm_data_dir": "/datasets/dapt-mlm",
     
     # Output paths
-    "models_dir": "/content/drive/MyDrive/NER_Master/models",
-    "logs_dir": "/content/drive/MyDrive/NER_Master/logs",
-    "results_dir": "/content/drive/MyDrive/NER_Master/results"
+    "models_dir": "/datasets/models",
+    "logs_dir": "/datasets/logs",
+    "results_dir": "/datasets/results"
 }
 
 # Local alternative paths

@@ -13,10 +13,10 @@ from pathlib import Path
 from transformers import (
     AutoTokenizer, AutoModelForTokenClassification,
     TrainingArguments, Trainer, DataCollatorForTokenClassification,
-    EarlyStoppingCallback
+    EarlyStoppingCallback, TrainerCallback
 )
 from seqeval.metrics import accuracy_score, f1_score, precision_score, recall_score
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, precision_recall_fscore_support
 
 
 def load_model_and_tokenizer(model_name: str, num_labels: int, 
@@ -123,15 +123,40 @@ def compute_metrics(eval_pred, id_to_label: Dict[int, str]):
     return results
 
 
-def create_trainer(model, training_args, train_dataset, val_dataset, 
+def create_trainer(model, training_args, train_dataset, val_dataset,
                   data_collator, tokenizer, id_to_label: Dict[int, str],
-                  early_stopping_patience: int = 3) -> Trainer:
-    """Create and configure the Trainer"""
-    
+                  early_stopping_patience: int = 3,
+                  additional_callbacks: list = None) -> Trainer:
+    """
+    Create and configure the Trainer.
+
+    Args:
+        model: The model to train
+        training_args: Training arguments
+        train_dataset: Training dataset
+        val_dataset: Validation dataset
+        data_collator: Data collator
+        tokenizer: Tokenizer
+        id_to_label: Mapping from label IDs to label names
+        early_stopping_patience: Patience for early stopping
+        additional_callbacks: Optional list of additional callbacks (e.g., PerClassMetricsCallback)
+
+    Returns:
+        Configured Trainer instance
+    """
+
     # Create compute_metrics function with id_to_label bound
     def compute_metrics_fn(eval_pred):
         return compute_metrics(eval_pred, id_to_label)
-    
+
+    # Build callbacks list
+    callbacks = [EarlyStoppingCallback(early_stopping_patience=early_stopping_patience)]
+    if additional_callbacks:
+        if isinstance(additional_callbacks, list):
+            callbacks.extend(additional_callbacks)
+        else:
+            callbacks.append(additional_callbacks)
+
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -140,13 +165,16 @@ def create_trainer(model, training_args, train_dataset, val_dataset,
         tokenizer=tokenizer,
         data_collator=data_collator,
         compute_metrics=compute_metrics_fn,
-        callbacks=[EarlyStoppingCallback(early_stopping_patience=early_stopping_patience)]
+        callbacks=callbacks
     )
-    
+
     print(f"🏋️  Created trainer with early stopping (patience: {early_stopping_patience})")
+    if additional_callbacks:
+        callback_names = [type(cb).__name__ for cb in (additional_callbacks if isinstance(additional_callbacks, list) else [additional_callbacks])]
+        print(f"📊 Additional callbacks: {', '.join(callback_names)}")
     print(f"📊 Training dataset size: {len(train_dataset)}")
     print(f"📊 Validation dataset size: {len(val_dataset)}")
-    
+
     return trainer
 
 
@@ -331,3 +359,143 @@ def load_inference_pipeline(model_path: str, max_length: int = 512, stride: int 
     except Exception as e:
         print(f"❌ Error loading inference pipeline: {e}")
         return None
+
+
+class PerClassMetricsCallback(TrainerCallback):
+    """
+    Custom callback to track per-class metrics during training.
+    Stores detailed metrics at each evaluation step for later analysis.
+    """
+
+    def __init__(self, id_to_label: Dict[int, str]):
+        """
+        Initialize callback.
+
+        Args:
+            id_to_label: Mapping from label IDs to label names
+        """
+        self.id_to_label = id_to_label
+        self.training_history = []
+        self.trainer = None  # Will be set by on_init_end
+
+    def on_init_end(self, args, state, control, **kwargs):
+        """Called when trainer is initialized - store reference to trainer"""
+        # Store reference to trainer if available
+        if 'model' in kwargs:
+            self.model = kwargs['model']
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        """Called after evaluation - store per-class metrics"""
+        if metrics is None:
+            return
+
+        # Try to get model and eval dataset from kwargs or stored references
+        model = kwargs.get('model', getattr(self, 'model', None))
+
+        # Try to get eval_dataset from kwargs
+        eval_dataset = kwargs.get('eval_dataset')
+
+        if model is None or eval_dataset is None:
+            # Just store the basic metrics
+            self.training_history.append({
+                'step': state.global_step,
+                'epoch': state.epoch,
+                **metrics
+            })
+            return
+
+        # Compute per-class metrics
+        try:
+            per_class_metrics = self._compute_per_class_metrics(
+                model, eval_dataset, args.device
+            )
+
+            # Store in history
+            self.training_history.append({
+                'step': state.global_step,
+                'epoch': state.epoch,
+                'eval_loss': metrics.get('eval_loss', 0),
+                'eval_precision': metrics.get('eval_precision', 0),
+                'eval_recall': metrics.get('eval_recall', 0),
+                'eval_f1': metrics.get('eval_f1', 0),
+                'eval_accuracy': metrics.get('eval_accuracy', 0),
+                'per_class_metrics': per_class_metrics
+            })
+
+        except Exception as e:
+            print(f"⚠️  Warning: Could not compute per-class metrics: {e}")
+            # Store basic metrics anyway
+            self.training_history.append({
+                'step': state.global_step,
+                'epoch': state.epoch,
+                **metrics
+            })
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        """Called when logging - store training loss"""
+        if logs is None:
+            return
+
+        if 'loss' in logs:
+            self.training_history.append({
+                'step': state.global_step,
+                'epoch': state.epoch,
+                'loss': logs['loss']
+            })
+
+    def _compute_per_class_metrics(self, model, eval_dataset, device):
+        """Compute precision, recall, F1 for each class"""
+        model.eval()
+
+        all_predictions = []
+        all_labels = []
+
+        with torch.no_grad():
+            for i in range(len(eval_dataset)):
+                item = eval_dataset[i]
+                input_ids = torch.tensor([item['input_ids']]).to(device)
+                attention_mask = torch.tensor([item['attention_mask']]).to(device)
+                labels = item['labels']
+
+                outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+                predictions = torch.argmax(outputs.logits, dim=-1)
+
+                # Get predictions and labels for non-padding tokens
+                pred_labels = predictions[0].cpu().numpy()
+                true_labels = np.array(labels)
+
+                # Filter out padding (-100)
+                mask = true_labels != -100
+                pred_labels = pred_labels[mask]
+                true_labels = true_labels[mask]
+
+                all_predictions.extend(pred_labels)
+                all_labels.extend(true_labels)
+
+        # Convert to label names
+        pred_label_names = [self.id_to_label.get(p, 'O') for p in all_predictions]
+        true_label_names = [self.id_to_label.get(t, 'O') for t in all_labels]
+
+        # Compute per-class metrics
+        unique_labels = sorted(list(set(true_label_names)))
+        precision, recall, f1, support = precision_recall_fscore_support(
+            true_label_names, pred_label_names,
+            labels=unique_labels,
+            average=None,
+            zero_division=0
+        )
+
+        per_class_metrics = {}
+        for i, label in enumerate(unique_labels):
+            per_class_metrics[label] = {
+                'precision': float(precision[i]),
+                'recall': float(recall[i]),
+                'f1': float(f1[i]),
+                'support': int(support[i])
+            }
+
+        return per_class_metrics
+
+    def get_training_history(self):
+        """Get the complete training history"""
+        return self.training_history

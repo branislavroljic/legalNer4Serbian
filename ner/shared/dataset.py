@@ -106,11 +106,15 @@ def split_dataset(examples: List[Dict], test_size: float = 0.2, val_size: float 
 
 
 def tokenize_and_align_labels_with_sliding_window(
-    examples: List[Dict], tokenizer: AutoTokenizer, label_to_id: Dict[str, int], 
+    examples: List[Dict], tokenizer: AutoTokenizer, label_to_id: Dict[str, int],
     max_length: int = 512, stride: int = 128
 ) -> List[Dict]:
     """
     Tokenize text and align labels with subword tokens using sliding windows.
+
+    Uses HuggingFace tokenizer's built-in sliding window support via
+    return_overflowing_tokens=True and stride parameters for cleaner,
+    more reliable implementation.
 
     Args:
         examples: List of examples with 'tokens' and 'labels'
@@ -123,80 +127,55 @@ def tokenize_and_align_labels_with_sliding_window(
         List of tokenized chunks with input_ids, attention_mask, and labels
     """
     tokenized_inputs = []
-    
+
     for example in examples:
         tokens = example['tokens']
         labels = example['labels']
-        
-        # Tokenize each word and keep track of word boundaries
-        tokenized_tokens = []
-        aligned_labels = []
-        word_ids = []
-        
-        for word_idx, (word, label) in enumerate(zip(tokens, labels)):
-            word_tokens = tokenizer.tokenize(word)
-            tokenized_tokens.extend(word_tokens)
-            
-            # First subword gets the original label, rest get -100 (ignored)
-            if word_tokens:
-                aligned_labels.append(label_to_id[label])
-                aligned_labels.extend([-100] * (len(word_tokens) - 1))
-                word_ids.extend([word_idx] * len(word_tokens))
-        
-        # Convert to input IDs
-        input_ids = tokenizer.convert_tokens_to_ids(tokenized_tokens)
-        
-        # Apply sliding window if sequence is too long
-        effective_max_length = max_length - 2  # Account for [CLS] and [SEP]
-        
-        if len(input_ids) <= effective_max_length:
-            # Single chunk
-            chunk_input_ids = [tokenizer.cls_token_id] + input_ids + [tokenizer.sep_token_id]
-            chunk_labels = [-100] + aligned_labels + [-100]
-            chunk_attention_mask = [1] * len(chunk_input_ids)
-            
-            # Pad to max_length
-            padding_length = max_length - len(chunk_input_ids)
-            chunk_input_ids.extend([tokenizer.pad_token_id] * padding_length)
-            chunk_labels.extend([-100] * padding_length)
-            chunk_attention_mask.extend([0] * padding_length)
-            
+
+        # Use built-in tokenizer with sliding window support
+        # is_split_into_words=True tells tokenizer that input is pre-tokenized
+        tokenized = tokenizer(
+            tokens,
+            is_split_into_words=True,
+            max_length=max_length,
+            stride=stride,
+            truncation=True,
+            padding='max_length',
+            return_overflowing_tokens=True,  # Creates multiple chunks for long sequences
+            return_offsets_mapping=False,    # We don't need character offsets
+        )
+
+        # Process each chunk (window) created by the tokenizer
+        num_chunks = len(tokenized['input_ids'])
+
+        for chunk_idx in range(num_chunks):
+            # Get word_ids for this chunk to align labels
+            word_ids = tokenized.word_ids(batch_index=chunk_idx)
+
+            # Align labels with subword tokens
+            aligned_labels = []
+            previous_word_idx = None
+
+            for word_idx in word_ids:
+                if word_idx is None:
+                    # Special tokens (CLS, SEP, PAD) get -100 (ignored in loss)
+                    aligned_labels.append(-100)
+                elif word_idx != previous_word_idx:
+                    # First subword of a word gets the original label
+                    aligned_labels.append(label_to_id[labels[word_idx]])
+                else:
+                    # Subsequent subwords of the same word get -100 (ignored)
+                    aligned_labels.append(-100)
+
+                previous_word_idx = word_idx
+
+            # Add this chunk to results
             tokenized_inputs.append({
-                'input_ids': chunk_input_ids,
-                'attention_mask': chunk_attention_mask,
-                'labels': chunk_labels
+                'input_ids': tokenized['input_ids'][chunk_idx],
+                'attention_mask': tokenized['attention_mask'][chunk_idx],
+                'labels': aligned_labels
             })
-        else:
-            # Multiple chunks with sliding window
-            start = 0
-            while start < len(input_ids):
-                end = min(start + effective_max_length, len(input_ids))
-                
-                chunk_input_ids = input_ids[start:end]
-                chunk_labels = aligned_labels[start:end]
-                
-                # Add special tokens
-                chunk_input_ids = [tokenizer.cls_token_id] + chunk_input_ids + [tokenizer.sep_token_id]
-                chunk_labels = [-100] + chunk_labels + [-100]
-                chunk_attention_mask = [1] * len(chunk_input_ids)
-                
-                # Pad to max_length
-                padding_length = max_length - len(chunk_input_ids)
-                chunk_input_ids.extend([tokenizer.pad_token_id] * padding_length)
-                chunk_labels.extend([-100] * padding_length)
-                chunk_attention_mask.extend([0] * padding_length)
-                
-                tokenized_inputs.append({
-                    'input_ids': chunk_input_ids,
-                    'attention_mask': chunk_attention_mask,
-                    'labels': chunk_labels
-                })
-                
-                # Move to next window
-                if end == len(input_ids):
-                    break
-                start += stride
-    
+
     return tokenized_inputs
 
 
@@ -264,11 +243,13 @@ def print_sequence_analysis(examples: List[Dict], tokenizer: AutoTokenizer):
 
 
 # Legacy function for backward compatibility
-def tokenize_and_align_labels(examples: List[Dict], tokenizer: AutoTokenizer, 
+def tokenize_and_align_labels(examples: List[Dict], tokenizer: AutoTokenizer,
                             label_to_id: Dict[str, int], max_length: int = 512) -> List[Dict]:
     """
     Legacy tokenization function - now calls the sliding window version.
     Kept for backward compatibility.
+
+    Note: Uses default stride of 128 tokens for sliding windows.
     """
     return tokenize_and_align_labels_with_sliding_window(
         examples, tokenizer, label_to_id, max_length, stride=128
